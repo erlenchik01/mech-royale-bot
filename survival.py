@@ -1,119 +1,151 @@
-"""Mech Royale: experimental survival policy v3.
+"""Mech Royale Survival AI v4 (protocol mechfight/1).
 
-Drop-in replacement for survival.py. Provides survival_action(obs) and never
-writes combat action fields, so CombatAI can remain independent.
+Conservative evolution of the better-scoring v2 policy. Controls only
+move/boost/jump, and can be combined with the team's unchanged CombatAI.
+
+Important: The official check/check.py replays observations; it cannot measure
+real survival, obstacle avoidance effectiveness, or match score.
 """
 import math
 
-# These values persist only during one bot process / match.
-_last_position = None
-_last_sample_tick = None
-_escape_until = -1
-_escape_side = 1
-_escape_target = None
+# Per-match observation state. The process controls only one mech.
+_last_pos = None
+_last_check_t = None
+_last_tick = None
+_escape_until_t = -1.0
+_escape_direction = 1
 
 
-def _norm(x, y):
-    d = math.hypot(x, y)
-    return (x / d, y / d) if d > 1e-8 else (0.0, 0.0)
+def _unit(dx, dy):
+    length = math.hypot(dx, dy)
+    return (dx / length, dy / length) if length > 1e-9 else (0.0, 0.0)
+
+
+def _reset():
+    global _last_pos, _last_check_t, _last_tick, _escape_until_t, _escape_direction
+    _last_pos = None
+    _last_check_t = None
+    _last_tick = None
+    _escape_until_t = -1.0
+    _escape_direction = 1
+
+
+def _projectile_avoidance(obs, x, y):
+    """Bounded sideways steering for nearby approaching projectiles.
+
+    Uses horizontal constant-velocity closest approach (short horizon only).
+    Does not attempt prediction of terrain collisions or mortar explosions.
+    """
+    best = (0.0, 0.0)
+    best_risk = 0.0
+    for p in obs.get('projectiles', ()):
+        pos, vel = p.get('pos'), p.get('vel')
+        if not pos or not vel:
+            continue
+        dx, dy = pos[0] - x, pos[1] - y
+        vx, vy = vel[0], vel[1]
+        speed2 = vx * vx + vy * vy
+        if speed2 < 100.0 or dx * dx + dy * dy > 70.0 * 70.0:
+            continue
+        # Time until projectile is closest to our current horizontal position.
+        t = - (dx * vx + dy * vy) / speed2
+        if not (0.0 < t < 0.45):
+            continue
+        miss = math.hypot(dx + vx * t, dy + vy * t)
+        if miss > 8.0:
+            continue
+        risk = (1.0 - miss / 8.0) * (1.0 - t / 0.45)
+        if risk > best_risk:
+            # Pick the side that moves away from the projected impact position.
+            px, py = dx + vx * t, dy + vy * t
+            side_x, side_y = _unit(-vy, vx)
+            if px * side_x + py * side_y > 0.0:
+                side_x, side_y = -side_x, -side_y
+            best, best_risk = (side_x, side_y), risk
+    return best[0] * best_risk, best[1] * best_risk
 
 
 def survival_action(obs):
-    global _last_position, _last_sample_tick, _escape_until, _escape_side, _escape_target
-
+    """Return protocol-compliant movement controls for a single observation."""
+    global _last_pos, _last_check_t, _last_tick, _escape_until_t, _escape_direction
     me = obs['self']
     x, y = me['pos'][:2]
     tick = obs['tick']
-    hp_ratio = me['hp'] / max(me['max_hp'], 1.0)
-    energy = me.get('energy', 0.0)
-    grounded = me.get('grounded', False)
+    t = float(obs.get('t', tick / 20.0))
+    if _last_tick is not None and (tick <= _last_tick or tick - _last_tick > 200):
+        _reset()
+    _last_tick = tick
+
     zone = obs['zone']
     cx, cy = zone['next_center']
-    r = zone['next_radius']
-    current_cx, current_cy = zone['center']
-    current_r = zone['radius']
-    d_next = math.hypot(x-cx, y-cy)
-    d_current = math.hypot(x-current_cx, y-current_cy)
-    inside_current = bool(me.get('in_zone', d_current < current_r))
+    radius = max(0.0, zone['next_radius'])
+    dist = math.hypot(cx - x, cy - y)
+    safe_radius = max(0.0, radius - min(25.0, radius * 0.20))
+    outside_now = not me.get('in_zone', True)
+    outside_next = dist > safe_radius
+    urgency = outside_now or dist > radius + 10.0
 
-    # Stay sufficiently deep in the next ring without insisting on its center.
-    margin = min(24.0, max(3.0, r * 0.16))
-    safe_r = max(0.0, r - margin)
-    urgently_outside = not inside_current or d_next > r
-    toward_x, toward_y = _norm(cx-x, cy-y)
+    # Preserve v2's steady inward pressure. Do not stop just because enemies
+    # are temporarily outside vision: health regen does not require idling.
+    weight = 3.0 if outside_now else (2.0 if outside_next else 0.15)
+    ux, uy = _unit(cx - x, cy - y)
+    vx, vy = weight * ux, weight * uy
 
-    # Fight for zone safety when necessary; otherwise preserve distance from enemies.
-    if not inside_current:
-        zx, zy = toward_x * 5.0, toward_y * 5.0
-    elif d_next > safe_r:
-        zx, zy = toward_x * 3.0, toward_y * 3.0
-    else:
-        zx, zy = 0.0, 0.0
-
-    ax, ay = zx, zy
-    closest = float('inf')
-    enemies = [m for m in obs.get('mechs', ()) if m.get('kind') == 'mech' and m.get('id') != me.get('id')]
-    for enemy in enemies:
-        ex, ey = enemy['pos'][:2]
-        dx, dy = x-ex, y-ey
-        d = math.hypot(dx, dy)
-        closest = min(closest, d)
-        if d < 1e-5 or d > 95.0:
+    nearest = float('inf')
+    health_ratio = me.get('hp', 1400.0) / max(1.0, me.get('max_hp', 1400.0))
+    for enemy in obs.get('mechs', ()):
+        if enemy.get('kind') != 'mech' or enemy.get('id') == me.get('id'):
             continue
-        # Avoid close engagements more strongly when weak.
-        threat = ((95.0-d)/95.0)**1.4
-        threat *= (3.2 if hp_ratio < 0.4 else 2.1 if hp_ratio < 0.75 else 1.2)
-        if urgently_outside:
-            threat *= 0.38
-        ax += threat * dx/d
-        ay += threat * dy/d
+        ex, ey = enemy['pos'][:2]
+        dx, dy = x - ex, y - ey
+        distance = math.hypot(dx, dy)
+        nearest = min(nearest, distance)
+        if 1e-6 < distance < 75.0:
+            strength = (75.0 - distance) / 75.0
+            strength *= 2.0 if health_ratio < 0.5 else 1.2
+            if outside_now or outside_next:
+                strength *= 0.45
+            vx += strength * dx / distance
+            vy += strength * dy / distance
 
-    # If taking fire from an unseen enemy, move away from the attack bearing.
-    for event in obs.get('events', ()):
-        if event.get('type') == 'damaged' and event.get('bearing') is not None:
-            bearing = event['bearing']
-            weight = min(1.8, 0.7 + event.get('amount', 0.0) / 160.0)
-            if urgently_outside:
-                weight *= 0.4
-            ax -= weight * math.cos(bearing)
-            ay -= weight * math.sin(bearing)
+    # Optional, cautious bullet dodge. Zone takes precedence when in danger.
+    dodge_x, dodge_y = _projectile_avoidance(obs, x, y)
+    if not urgency:
+        vx += 1.3 * dodge_x
+        vy += 1.3 * dodge_y
 
-    # Detect stalled motion only when our earlier command was to move.
-    if _last_sample_tick is None or tick < _last_sample_tick:
-        _last_position = (x, y)
-        _last_sample_tick = tick
-        _escape_until = -1
-    elif tick - _last_sample_tick >= 24:
-        moved = math.hypot(x-_last_position[0], y-_last_position[1])
-        trying_to_move = math.hypot(ax, ay) > 0.5
-        if trying_to_move and moved < 3.0 and grounded:
-            _escape_side *= -1
-            _escape_until = tick + 35
-            _escape_target = (ax, ay)
-        _last_position = (x, y)
-        _last_sample_tick = tick
+    if not outside_now and not outside_next and radius > 0.0:
+        mx, my = _unit(vx, vy)
+        if math.hypot(x + mx * 15.0 - cx, y + my * 15.0 - cy) > safe_radius:
+            vx, vy = ux, uy
 
-    # Attempt a lateral detour around an obstruction; keep zone priority.
-    escaping = tick < _escape_until and _escape_target is not None
-    if escaping and not urgently_outside:
-        ux, uy = _norm(*_escape_target)
-        ax += 3.0 * (-uy) * _escape_side
-        ay += 3.0 * ux * _escape_side
+    mx, my = _unit(vx, vy)
+    energy = float(me.get('energy', 0.0))
+    grounded = bool(me.get('grounded', False))
 
-    # Prevent hazard avoidance from steering us outside a circle we already occupy.
-    mx, my = _norm(ax, ay)
-    if inside_current and d_next < safe_r and r > 2.0:
-        projected = math.hypot(x + mx * 12.0 - cx, y + my * 12.0 - cy)
-        if projected > safe_r:
-            mx, my = toward_x, toward_y
+    # Detect a real movement stall by comparing observed positions over time.
+    # Do not activate from a single frame. A recorded replay is not suitable
+    # for evaluating this trigger because actions do not affect positions.
+    if _last_check_t is None:
+        _last_check_t, _last_pos = t, (x, y)
+    elif t - _last_check_t >= 1.3:
+        actual_distance = math.hypot(x - _last_pos[0], y - _last_pos[1])
+        wants_to_move = math.hypot(mx, my) > 0.5
+        if grounded and wants_to_move and actual_distance < 1.8 and energy > 62.0:
+            _escape_until_t = t + 1.4
+            _escape_direction = -_escape_direction
+        _last_check_t, _last_pos = t, (x, y)
 
-    # If safe and alone, remain quiet and allow health / energy regeneration.
-    if d_next < safe_r - 8.0 and closest > 95.0 and not urgently_outside:
-        mx, my = 0.0, 0.0
+    escaping = t < _escape_until_t
+    # When blocked, steer diagonally along the wall while jumping over it.
+    # The jet works only while airborne per mechfight/1, not on the ground.
+    if escaping:
+        mx, my = _unit(mx - _escape_direction * my * 0.9,
+                       my + _escape_direction * mx * 0.9)
 
-    urgent_escape = closest < 24.0 and hp_ratio < 0.65
-    boost = bool(grounded and energy > (32.0 if urgent_escape else 45.0)
-                 and (urgently_outside or urgent_escape or (d_next > safe_r + 75.0)))
-    # Jump only if repeatedly stalled and we can spare energy; in air boost jets upward.
-    jump = bool(escaping and grounded and energy > 50.0 and tick % 12 < 2)
-    return {'move': [mx, my], 'boost': boost, 'jump': jump}
+    jump = bool(escaping and grounded and energy > 48.0)
+    jet = bool(escaping and not grounded and energy > 24.0)
+    emergency_boost = bool(grounded and energy > 25.0 and
+                           (urgency or (nearest < 35.0 and health_ratio < 0.6)))
+    boost = jet or emergency_boost
+    return {'move': [mx, my], 'boost': bool(boost), 'jump': bool(jump)}
