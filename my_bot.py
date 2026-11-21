@@ -4,7 +4,7 @@ import mechfight as mf
 
 
 class Bot:
-    name = "example-py"
+    name = "survival-v1"
 
     def __init__(self, hello: mf.Hello):
         self.reach = hello["config"]["loot"]["pickup_radius"]
