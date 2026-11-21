@@ -1,7 +1,7 @@
 """Example bot: walk to the zone, grab a weapon, shoot the nearest mech, draw what it's thinking."""
 import math
 import mechfight as mf
-
+from survival import survival_action
 
 class Bot:
     name = "survival-v1"
@@ -29,6 +29,7 @@ class Bot:
             mf.draw.line([x, y, z + 7], [t[0], t[1], t[2] + 4.5], "#ff5040")
         mf.draw.point([goal[0], goal[1], z], "#40c0ff", 6)
         mf.draw.label(f"hp {me['hp']:.0f} · {len(enemies)} in sight")
+        act.update(survival_action(obs))
         return act
 
 
