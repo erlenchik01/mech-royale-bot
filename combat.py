@@ -123,11 +123,21 @@ class CombatAI:
         npcs = [m for m in obs.get('mechs', [])
                 if m.get('kind') == 'npc'
                 and _distance(m['pos'], me['pos']) <= 65.0]
-        if not npcs:
+        if npcs:
+            return min(npcs, key=lambda m: (
+                _distance(m['pos'], me['pos'])
+                - (8.0 if m.get('id') == self.last_target_id else 0.0)))
+
+        # v11: break visible crates only when there is no viable enemy or NPC.
+        # Do not chase crates: survival_action() still owns movement.
+        crates = [c for c in obs.get('crates', [])
+                  if _distance(c['pos'], me['pos']) <= 55.0
+                  and c.get('hp', 1) > 0]
+        if not crates:
             return None
-        return min(npcs, key=lambda m: (
-            _distance(m['pos'], me['pos'])
-            - (8.0 if m.get('id') == self.last_target_id else 0.0)))
+        crate = min(crates, key=lambda c: _distance(c['pos'], me['pos']))
+        return {'id': crate['id'], 'kind': 'crate', 'pos': crate['pos'],
+                'vel': [0.0, 0.0, 0.0]}
 
     def choose_upgrade(self, offer):
         if not offer:
@@ -178,7 +188,7 @@ class CombatAI:
 
     def _options(self, me, target):
         d = _distance(me['pos'], target['pos'])
-        enemy_h = 1.8 if target.get('kind') == 'npc' else 4.5
+        enemy_h = 1.8 if target.get('kind') in ('npc', 'crate') else 4.5
         choices = []
         for i, w in enumerate(me.get('weapons', [])):
             if not w:
