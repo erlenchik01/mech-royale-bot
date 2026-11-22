@@ -128,23 +128,37 @@ class CombatAI:
         return min(npcs, key=lambda m: (
             _distance(m['pos'], me['pos'])
             - (8.0 if m.get('id') == self.last_target_id else 0.0)))
-
     def choose_upgrade(self, offer):
         if not offer:
             return None
+
         scores = {
-            'armor': 12, 'regen': 11, 'hp': 11, 'health': 11,
-            'speed': 10, 'energy': 9, 'mobility': 9, 'boost': 9,
-            'gun_rate': 7, 'gun_damage': 7, 'laser_damage': 8,
-            'lightning': 7, 'mortar': 6, 'sensors': 5,
+            'armor': 12,
+            'plating': 11,
+            'nanites': 10,
+            'servos': 9,
+            'sensors': 7,
+            'gyros': 6,
+            'capacitor': 5,
+            'reactor': 5,
+            'jets': 5,
+            'gun_damage': 6,
+            'gun_rate': 6,
+            'laser_damage': 6,
+            'lightning_efficiency': 5,
+            'lightning_chain': 5,
         }
+
         choices = offer.get('choices', [])
         if not choices:
             return None
-        def score(choice):
-            key = choice.get('id', '').lower()
-            return max((v for k, v in scores.items() if k in key), default=4)
-        return max(range(len(choices)), key=lambda i: score(choices[i]))
+
+        return max(
+            range(len(choices)),
+            key=lambda i: scores.get(
+                choices[i].get('id', '').lower(), 4
+            )
+        )
 
     def choose_pickup(self, obs):
         me = obs['self']
