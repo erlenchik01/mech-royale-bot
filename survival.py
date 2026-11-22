@@ -1,6 +1,6 @@
-"""Mech Royale Survival AI v4 (protocol mechfight/1).
+"""Mech Royale Survival AI v6 (protocol mechfight/1).
 
-Conservative evolution of the better-scoring v2 policy. Controls only
+Experiment based on the best-scoring v4 policy. Controls only
 move/boost/jump, and can be combined with the team's unchanged CombatAI.
 
 Important: The official check/check.py replays observations; it cannot measure
@@ -13,6 +13,7 @@ _last_pos = None
 _last_check_t = None
 _last_tick = None
 _escape_until_t = -1.0
+_escape_started_t = -1.0
 _escape_direction = 1
 
 
@@ -22,11 +23,12 @@ def _unit(dx, dy):
 
 
 def _reset():
-    global _last_pos, _last_check_t, _last_tick, _escape_until_t, _escape_direction
+    global _last_pos, _last_check_t, _last_tick, _escape_until_t, _escape_started_t, _escape_direction
     _last_pos = None
     _last_check_t = None
     _last_tick = None
     _escape_until_t = -1.0
+    _escape_started_t = -1.0
     _escape_direction = 1
 
 
@@ -67,7 +69,7 @@ def _projectile_avoidance(obs, x, y):
 
 def survival_action(obs):
     """Return protocol-compliant movement controls for a single observation."""
-    global _last_pos, _last_check_t, _last_tick, _escape_until_t, _escape_direction
+    global _last_pos, _last_check_t, _last_tick, _escape_until_t, _escape_started_t, _escape_direction
     me = obs['self']
     x, y = me['pos'][:2]
     tick = obs['tick']
@@ -132,11 +134,16 @@ def survival_action(obs):
         actual_distance = math.hypot(x - _last_pos[0], y - _last_pos[1])
         wants_to_move = math.hypot(mx, my) > 0.5
         if grounded and wants_to_move and actual_distance < 1.8 and energy > 62.0:
-            _escape_until_t = t + 1.4
+            # Allow enough time to climb, instead of stopping the jet after 1.4 s.
+            _escape_started_t = t
+            _escape_until_t = t + 3.2
             _escape_direction = -_escape_direction
         _last_check_t, _last_pos = t, (x, y)
 
     escaping = t < _escape_until_t
+    # If an airborne mech is still escaping, keep the jet on. Stop before
+    # draining the energy reserve entirely; do not retrigger while airborne.
+    # A known caveat: there is no obstacle height estimate in this experiment.
     # When blocked, steer diagonally along the wall while jumping over it.
     # The jet works only while airborne per mechfight/1, not on the ground.
     if escaping:
@@ -144,7 +151,7 @@ def survival_action(obs):
                        my + _escape_direction * mx * 0.9)
 
     jump = bool(escaping and grounded and energy > 48.0)
-    jet = bool(escaping and not grounded and energy > 24.0)
+    jet = bool(escaping and not grounded and energy > 35.0)
     emergency_boost = bool(grounded and energy > 25.0 and
                            (urgency or (nearest < 35.0 and health_ratio < 0.6)))
     boost = jet or emergency_boost
