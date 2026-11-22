@@ -89,23 +89,45 @@ class CombatAI:
                       key=lambda m: _distance(m['pos'], me['pos']))
 
     def select_target(self, obs):
+        """Prefer nearby mechs, or opportunistic NPCs when fighting is safe."""
         me = obs['self']
         enemies = self.find_enemies(obs)
-        if not enemies:
-            return None
-        health = me.get('hp', 1) / max(me.get('max_hp', 1), 1)
-        # Avoid unnecessary distant engagements when weakened.
-        max_range = 95.0 if health < 0.35 else 185.0
+        hp_ratio = me.get('hp', 1) / max(me.get('max_hp', 1), 1)
+        max_range = 95.0 if hp_ratio < 0.35 else 185.0
         eligible = [m for m in enemies if _distance(m['pos'], me['pos']) <= max_range]
-        if not eligible:
-            return None
+
+        # Mechs remain the priority. Never farm NPCs while exposed to nearby mechs.
         def priority(m):
             d = _distance(m['pos'], me['pos'])
             hp = m.get('hp')
             weakness = (1.0 - hp / max(m.get('max_hp', 1), 1)) if hp is not None else 0.0
             continuity = 0.25 if m.get('id') == self.last_target_id else 0.0
             return (1.8 / (1.0 + d / 60.0)) + 0.6 * weakness + continuity
-        return max(eligible, key=priority)
+
+        if eligible:
+            return max(eligible, key=priority)
+
+        # NPC farming v7: only while healthy, in-zone, with energy, and
+        # with no known mech in close proximity. This is not NPC chasing:
+        # survival_action() still owns movement.
+        if (hp_ratio < 0.75 or not me.get('in_zone', True)
+                or me.get('energy', 0) < 20):
+            return None
+        if any(_distance(m['pos'], me['pos']) < 110.0 for m in enemies):
+            return None
+        weapon_ready = any(w and w.get('kind') == 'gun'
+                           and w.get('reload', 0) <= 0
+                           and w.get('ammo', 0) >= 4 for w in me.get('weapons', []))
+        if not weapon_ready:
+            return None
+        npcs = [m for m in obs.get('mechs', [])
+                if m.get('kind') == 'npc'
+                and _distance(m['pos'], me['pos']) <= 65.0]
+        if not npcs:
+            return None
+        return min(npcs, key=lambda m: (
+            _distance(m['pos'], me['pos'])
+            - (8.0 if m.get('id') == self.last_target_id else 0.0)))
 
     def choose_upgrade(self, offer):
         if not offer:
