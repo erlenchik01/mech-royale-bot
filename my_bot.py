@@ -18,6 +18,7 @@ class Bot:
 
         # Nazerke: Combat AI
         action.update(self.combat.act(obs))
+        action["fire"] = [False, False]
 
         return action
 
