@@ -119,6 +119,62 @@ def survival_action(obs):
         if math.hypot(x + mx * 15.0 - cx, y + my * 15.0 - cy) > safe_radius:
             vx, vy = ux, uy
 
+    # v8: collect nearby Power Cubes when it is safe.
+    if (
+        not outside_now
+        and not outside_next
+        and not urgency
+        and nearest >= 90.0
+        and health_ratio >= 0.50
+        and math.hypot(dodge_x, dodge_y) < 0.05
+    ):
+        best_cube = None
+        best_distance = float('inf')
+
+        for cube in obs.get('cubes', []):
+            pos = cube.get('pos')
+            if not pos:
+                continue
+
+            cube_x, cube_y = pos[:2]
+            cube_dist = math.hypot(cube_x - x, cube_y - y)
+
+            # Only pursue nearby, reachable-looking cubes.
+            if not (3.5 < cube_dist <= 55.0):
+                continue
+
+            # Avoid cubes too high or low to collect directly.
+            if abs(pos[2] - me['pos'][2]) > 3.0:
+                continue
+
+            # Do not leave the next safe circle.
+            if math.hypot(cube_x - cx, cube_y - cy) > safe_radius:
+                continue
+
+            # Avoid cubes near visible enemy mechs.
+            dangerous = any(
+                enemy.get('kind') == 'mech'
+                and enemy.get('id') != me.get('id')
+                and math.hypot(
+                    cube_x - enemy['pos'][0],
+                    cube_y - enemy['pos'][1]
+                ) < 65.0
+                for enemy in obs.get('mechs', [])
+            )
+
+            if dangerous:
+                continue
+
+            if cube_dist < best_distance:
+                best_cube = pos
+                best_distance = cube_dist
+
+        if best_cube is not None:
+            vx, vy = _unit(
+                best_cube[0] - x,
+                best_cube[1] - y
+            )
+
     mx, my = _unit(vx, vy)
     energy = float(me.get('energy', 0.0))
     grounded = bool(me.get('grounded', False))
