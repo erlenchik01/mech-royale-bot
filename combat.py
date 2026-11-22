@@ -246,6 +246,12 @@ class CombatAI:
         radius = 1.8 if target.get('kind') == 'npc' else 2.5
         tolerance = min(0.14, max(0.018, math.atan2(radius * 0.80, max(horizontal_range, 1.0))))
         aligned = error_yaw < tolerance and error_pitch < max(tolerance, 0.045)
+        # v10: conserve gun ammo against distant moving targets.
+        # Stationary targets retain the weapon's original effective range.
+        target_vel = target.get('vel', [0.0, 0.0, 0.0])
+        moving_target = math.hypot(target_vel[0], target_vel[1]) > 1.0
+        gun_fire_in_range = (not moving_target or
+                             _distance(me['pos'], target['pos']) <= 100.0)
         weapon = me['weapons'][idx]
         if kind == 'laser':
             charge = weapon.get('charge', 0)
@@ -257,7 +263,8 @@ class CombatAI:
             result['fire'][idx] = (error_yaw < cone * 0.65 and aligned and
                                    weapon.get('cooldown', 0) <= 0.1)
         else:
-            result['fire'][idx] = aligned and weapon.get('cooldown', 0) <= 0.1
+            result['fire'][idx] = (aligned and weapon.get('cooldown', 0) <= 0.1
+                                   and (kind != 'gun' or gun_fire_in_range))
         # Gun can fire concurrently with a non-gun main weapon if aim also lines up.
         for j, w in enumerate(me.get('weapons', [])):
             if j == idx or not w or w['kind'] != 'gun' or w.get('reload', 0) > 0 or w.get('ammo', 0) <= 0:
@@ -265,6 +272,7 @@ class CombatAI:
             gun_aim = _intercept(me, target, w.get('stats', {}).get('speed', 252), 4.5)
             if (_distance(me['pos'], target['pos']) < w.get('stats', {}).get('range', 230) and
                 abs(_angle_delta(gun_aim[0], yaw)) < tolerance and
-                abs(gun_aim[1] - pitch) < max(tolerance, 0.045) and aligned):
+                abs(gun_aim[1] - pitch) < max(tolerance, 0.045) and aligned
+                and gun_fire_in_range):
                 result['fire'][j] = True
         return result
